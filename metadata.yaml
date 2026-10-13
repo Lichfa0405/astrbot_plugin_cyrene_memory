@@ -1,0 +1,5 @@
+name: astrbot_plugin_cyrene_memory
+author: EGO
+version: v0.1.0
+description: 基于 Cyrene Agent 理念的分层记忆插件，只读兼容 LivingMemory
+repo: ""

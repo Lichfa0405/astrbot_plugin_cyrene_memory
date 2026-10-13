@@ -1,0 +1,24 @@
+{
+  "livingmemory_compat": {
+    "type": "object",
+    "description": "LivingMemory 只读兼容层",
+    "items": {
+      "enabled": {"type": "bool", "default": true, "description": "是否启用 LivingMemory 只读兼容"},
+      "db_path": {"type": "string", "default": "/root/astrbot-data/data/plugin_data/astrbot_plugin_livingmemory/livingmemory.db", "description": "LivingMemory 数据库文件的绝对路径"},
+      "identity_mappings": {"type": "list", "description": "session_id 匹配片段列表", "items": {"type": "string"}},
+      "text_aliases": {"type": "list", "description": "文本关键词列表", "items": {"type": "string"}},
+      "group_session_pattern": {"type": "string", "default": "livingmemory:global", "description": "群聊 session_id 匹配模式"}
+    }
+  },
+  "memory_injection": {
+    "type": "object",
+    "description": "记忆注入（保护 prompt 缓存）",
+    "items": {
+      "enabled": {"type": "bool", "default": true, "description": "是否启用记忆自动注入"},
+      "inject_l0": {"type": "bool", "default": true, "description": "注入 L0 画像"},
+      "inject_l2": {"type": "bool", "default": true, "description": "注入 L2 长期事件"},
+      "inject_livingmemory": {"type": "bool", "default": true, "description": "注入 LivingMemory 只读记忆"},
+      "max_chars": {"type": "int", "default": 1200, "description": "注入块最大字符数"}
+    }
+  }
+}
