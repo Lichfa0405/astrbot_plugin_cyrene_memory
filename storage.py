@@ -37,6 +37,7 @@ class CyreneStorage:
                     updated_at = excluded.updated_at
             """, (user_id, category, key, value, confidence, now, now))
             conn.commit()
+            return conn.execute("SELECT id FROM l0_profile WHERE user_id=? AND category=? AND key=?", (user_id, category, key)).fetchone()["id"]
         finally:
             conn.close()
 
@@ -83,15 +84,17 @@ class CyreneStorage:
 
     # ---------- L2 ----------
     def append_l2(self, user_id: str, content: str, importance: float = 0.5,
-                  sentiment: str = None, tags: str = "[]", entities: str = "[]", event_time: float = None):
+                  sentiment: str = None, tags: str = "[]", entities: str = "[]",
+                  event_time: float = None, emotion_note: str = ""):
         now = time.time()
         conn = self._conn()
         try:
             conn.execute("""
-                INSERT INTO l2_events (user_id, event_time, content, entities, sentiment, tags, importance, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (user_id, event_time or now, content, entities, sentiment, tags, importance, now))
+                INSERT INTO l2_events (user_id, event_time, content, entities, sentiment, tags, importance, created_at, emotion_note)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (user_id, event_time or now, content, entities, sentiment, tags, importance, now, emotion_note or ""))
             conn.commit()
+            return conn.execute("SELECT last_insert_rowid() as id").fetchone()["id"]
         finally:
             conn.close()
 
@@ -109,5 +112,115 @@ class CyreneStorage:
                     (user_id, limit)
                 ).fetchall()
             return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    # ---------- Relationship ----------
+    def get_relationship(self, user_id: str):
+        conn = self._conn()
+        try:
+            row = conn.execute("SELECT * FROM relationship_state WHERE user_id = ?", (user_id,)).fetchone()
+            if row:
+                return dict(row)
+            # 如果没记录，返回默认值
+            return {"user_id": user_id, "stage": "初识", "recent_mood": "平稳", "updated_at": time.time()}
+        finally:
+            conn.close()
+
+    def update_relationship(self, user_id: str, stage: str = None, recent_mood: str = None):
+        now = time.time()
+        conn = self._conn()
+        try:
+            conn.execute("INSERT OR IGNORE INTO relationship_state (user_id, updated_at) VALUES (?, ?)", (user_id, now))
+            if stage is not None:
+                conn.execute("UPDATE relationship_state SET stage = ?, updated_at = ? WHERE user_id = ?", (stage, now, user_id))
+            if recent_mood is not None:
+                conn.execute("UPDATE relationship_state SET recent_mood = ?, updated_at = ? WHERE user_id = ?", (recent_mood, now, user_id))
+            conn.commit()
+        finally:
+            conn.close()
+
+    # ---------- Reflection 支持 ----------
+    def get_unreflected_l1(self, user_id: str, limit: int = 50):
+        conn = self._conn()
+        try:
+            rows = conn.execute(
+                "SELECT id, role, content FROM l1_working WHERE user_id = ? AND is_reflected = 0 ORDER BY id ASC LIMIT ?",
+                (user_id, limit)
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def mark_l1_reflected(self, ids: list):
+        if not ids: return
+        conn = self._conn()
+        try:
+            placeholders = ','.join('?' * len(ids))
+            conn.execute(f"UPDATE l1_working SET is_reflected = 1 WHERE id IN ({placeholders})", ids)
+            conn.commit()
+        finally:
+            conn.close()
+
+    # ---------- Tasks (状态机) ----------
+    def upsert_task(self, user_id: str, title: str, status: str = "active", summary: str = ""):
+        now = time.time()
+        conn = self._conn()
+        try:
+            # 检查是否存在同名且未完成的任务
+            row = conn.execute("SELECT id FROM tasks WHERE user_id = ? AND title = ? AND status != 'done'", (user_id, title)).fetchone()
+            if row:
+                conn.execute(
+                    "UPDATE tasks SET status = ?, summary = ?, updated_at = ? WHERE id = ?",
+                    (status, summary, now, row["id"])
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO tasks (user_id, title, status, summary, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    (user_id, title, status, summary, now, now)
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def get_active_tasks(self, user_id: str, limit: int = 5):
+        conn = self._conn()
+        try:
+            rows = conn.execute(
+                "SELECT title, status, summary FROM tasks WHERE user_id = ? AND status IN ('active', 'paused') ORDER BY updated_at DESC LIMIT ?",
+                (user_id, limit)
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def get_all_tasks(self, user_id: str):
+        conn = self._conn()
+        try:
+            rows = conn.execute(
+                "SELECT id, title, status, summary, updated_at FROM tasks WHERE user_id = ? ORDER BY updated_at DESC",
+                (user_id,)
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    # ---------- Embeddings ----------
+    def save_embedding(self, record_id: int, record_type: str, vector_bytes: bytes):
+        conn = self._conn()
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO embeddings (record_id, record_type, vector, updated_at) VALUES (?, ?, ?, ?)",
+                (record_id, record_type, vector_bytes, time.time())
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def get_all_embeddings(self, record_type: str):
+        conn = self._conn()
+        try:
+            rows = conn.execute("SELECT record_id, vector FROM embeddings WHERE record_type = ?", (record_type,)).fetchall()
+            return {r["record_id"]: r["vector"] for r in rows}
         finally:
             conn.close()

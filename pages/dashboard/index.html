@@ -41,10 +41,14 @@
       <button class="tab active" data-tab="l0">L0 画像</button>
       <button class="tab" data-tab="l1">L1 工作记忆</button>
       <button class="tab" data-tab="l2">L2 长期事件</button>
+      <button class="tab" data-tab="rel">关系状态</button>
+      <button class="tab" data-tab="tasks">任务看板</button>
     </div>
     <div class="panel active" id="panel-l0"><div class="loading">加载中…</div></div>
     <div class="panel" id="panel-l1"><div class="loading">加载中…</div></div>
     <div class="panel" id="panel-l2"><div class="loading">加载中…</div></div>
+    <div class="panel" id="panel-rel"><div class="loading">加载中…</div></div>
+    <div class="panel" id="panel-tasks"><div class="loading">加载中…</div></div>
   </main>
 
   <script type="module">
@@ -80,7 +84,7 @@
         document.getElementById("stats").innerHTML =
           `<div><b>${d.l0 ?? 0}</b> L0 画像</div>` +
           `<div><b>${d.l1 ?? 0}</b> L1 工作记忆</div>` +
-          `<div><b>${d.l2 ?? 0}</b> L2 长期事件</div>`;
+          `<div><b>${d.l2 ?? 0}</b> L2 长期事件</div><div><b>${d.rel ?? 0}</b> 关系状态</div><div><b>${d.tasks ?? 0}</b> 活跃任务</div>`;
       } catch (e) {
         document.getElementById("stats").innerHTML = `<div>统计加载失败: ${esc(e.message)}</div>`;
       }
@@ -139,16 +143,53 @@
         const d = await apiGet("page/l2");
         const items = d.items || [];
         if (!items.length) { el.innerHTML = `<div class="empty">L2 为空</div>`; return; }
-        el.innerHTML = `<table><thead><tr><th>ID</th><th>用户</th><th>内容</th><th>情感</th><th>标签</th><th>重要度</th><th>时间</th><th></th></tr></thead><tbody>` +
+        el.innerHTML = `<table><thead><tr><th>ID</th><th>用户</th><th>内容</th><th>情感标签 (emotion_note)</th><th>结构化情感</th><th>标签</th><th>重要度</th><th>时间</th><th></th></tr></thead><tbody>` +
           items.map(r => `<tr>
             <td>${r.id}</td>
             <td>${esc(r.user_id)}</td>
             <td>${esc(r.content)}</td>
+            <td>${esc(r.emotion_note || "-")}</td>
             <td>${esc(r.sentiment || "")}</td>
             <td>${esc(r.tags || "")}</td>
             <td>${r.importance}</td>
             <td>${ts(r.created_at)}</td>
             <td><button class="del" data-kind="l2" data-id="${r.id}">删除</button></td>
+          </tr>`).join("") + `</tbody></table>`;
+      } catch (e) {
+        el.innerHTML = `<div class="empty">加载失败: ${esc(e.message)}</div>`;
+      }
+    }
+
+    async function loadTasks() {
+      const el = document.getElementById("panel-tasks");
+      try {
+        const d = await apiGet("page/tasks");
+        const items = d.items || [];
+        if (!items.length) { el.innerHTML = `<div class="empty">暂无任务</div>`; return; }
+        el.innerHTML = `<table><thead><tr><th>状态</th><th>任务标题</th><th>最新摘要</th><th>最后更新</th></tr></thead><tbody>` +
+          items.map(r => `<tr>
+            <td style="color:${r.status === 'done' ? '#888' : 'var(--accent)'}; font-weight:bold;">${esc(r.status)}</td>
+            <td>${esc(r.title)}</td>
+            <td>${esc(r.summary)}</td>
+            <td>${ts(r.updated_at)}</td>
+          </tr>`).join("") + `</tbody></table>`;
+      } catch (e) {
+        el.innerHTML = `<div class="empty">加载失败: ${esc(e.message)}</div>`;
+      }
+    }
+
+    async function loadRel() {
+      const el = document.getElementById("panel-rel");
+      try {
+        const d = await apiGet("page/relationship");
+        const items = d.items || [];
+        if (!items.length) { el.innerHTML = `<div class="empty">暂无关系数据</div>`; return; }
+        el.innerHTML = `<table><thead><tr><th>用户</th><th>关系阶段</th><th>近期情绪</th><th>最后更新</th></tr></thead><tbody>` +
+          items.map(r => `<tr>
+            <td>${esc(r.user_id)}</td>
+            <td style="color:var(--accent); font-weight:bold;">${esc(r.stage)}</td>
+            <td>${esc(r.recent_mood)}</td>
+            <td>${ts(r.updated_at)}</td>
           </tr>`).join("") + `</tbody></table>`;
       } catch (e) {
         el.innerHTML = `<div class="empty">加载失败: ${esc(e.message)}</div>`;
@@ -185,6 +226,8 @@
     loadL0();
     loadL1();
     loadL2();
+    loadRel();
+    loadTasks();
   </script>
 </body>
 </html>

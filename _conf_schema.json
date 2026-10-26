@@ -3,22 +3,123 @@
     "type": "object",
     "description": "LivingMemory 只读兼容层",
     "items": {
-      "enabled": {"type": "bool", "default": true, "description": "是否启用 LivingMemory 只读兼容"},
-      "db_path": {"type": "string", "default": "/root/astrbot-data/data/plugin_data/astrbot_plugin_livingmemory/livingmemory.db", "description": "LivingMemory 数据库文件的绝对路径"},
-      "identity_mappings": {"type": "list", "description": "session_id 匹配片段列表", "items": {"type": "string"}},
-      "text_aliases": {"type": "list", "description": "文本关键词列表", "items": {"type": "string"}},
-      "group_session_pattern": {"type": "string", "default": "livingmemory:global", "description": "群聊 session_id 匹配模式"}
+      "enabled": {
+        "type": "bool",
+        "default": true,
+        "description": "是否启用 LivingMemory 只读兼容"
+      },
+      "db_path": {
+        "type": "string",
+        "default": "/root/astrbot-data/data/plugin_data/astrbot_plugin_livingmemory/livingmemory.db",
+        "description": "LivingMemory 数据库路径"
+      },
+      "identity_mappings": {
+        "type": "list",
+        "description": "session_id 匹配片段",
+        "items": {
+          "type": "string"
+        }
+      },
+      "text_aliases": {
+        "type": "list",
+        "description": "文本关键词列表",
+        "items": {
+          "type": "string"
+        }
+      },
+      "group_session_pattern": {
+        "type": "string",
+        "default": "livingmemory:global",
+        "description": "群聊 session_id 匹配模式"
+      }
     }
   },
   "memory_injection": {
     "type": "object",
-    "description": "记忆注入（保护 prompt 缓存）",
+    "description": "记忆注入配置",
     "items": {
-      "enabled": {"type": "bool", "default": true, "description": "是否启用记忆自动注入"},
-      "inject_l0": {"type": "bool", "default": true, "description": "注入 L0 画像"},
-      "inject_l2": {"type": "bool", "default": true, "description": "注入 L2 长期事件"},
-      "inject_livingmemory": {"type": "bool", "default": true, "description": "注入 LivingMemory 只读记忆"},
-      "max_chars": {"type": "int", "default": 1200, "description": "注入块最大字符数"}
+      "enabled": {
+        "type": "bool",
+        "default": true,
+        "description": "是否启用记忆自动注入"
+      },
+      "inject_l0": {
+        "type": "bool",
+        "default": true,
+        "description": "注入 L0 画像"
+      },
+      "inject_l2": {
+        "type": "bool",
+        "default": true,
+        "description": "注入 L2 长期事件"
+      },
+      "inject_livingmemory": {
+        "type": "bool",
+        "default": true,
+        "description": "注入 LivingMemory 记忆"
+      },
+      "max_chars": {
+        "type": "int",
+        "default": 1500,
+        "description": "注入块最大字符数"
+      }
+    }
+  },
+  "reflection": {
+    "type": "object",
+    "description": "后台反思总结",
+    "items": {
+      "enabled": {
+        "type": "bool",
+        "default": true,
+        "description": "是否启用后台反思"
+      },
+      "trigger_count": {
+        "type": "int",
+        "default": 15,
+        "description": "积累多少条 L1 触发一次反思"
+      },
+      "primary_provider_id": {
+        "type": "string",
+        "default": "",
+        "description": "反思主模型 ID（留空则用默认）"
+      },
+      "fallback_provider_id": {
+        "type": "string",
+        "default": "",
+        "description": "反思回退模型 ID（主模型失败时用）"
+      },
+      "max_retries": {
+        "type": "int",
+        "default": 3,
+        "description": "单次反思最大重试次数"
+      }
+    }
+  },
+  "embedding": {
+    "type": "object",
+    "description": "本地向量模型配置（语义检索）",
+    "items": {
+      "enabled": {
+        "type": "bool",
+        "default": true,
+        "description": "是否启用向量检索"
+      },
+      "api_url": {
+        "type": "string",
+        "default": "http://127.0.0.1:11434/api/embed",
+        "description": "Ollama API 地址"
+      },
+      "model_name": {
+        "type": "string",
+        "default": "qwen3-embedding:0.6b",
+        "description": "嵌入模型名称"
+      },
+      "timeout": {
+        "type": "int",
+        "default": 120,
+        "description": "请求超时时间（秒）"
+      }
     }
   }
 }

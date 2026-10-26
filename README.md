@@ -202,3 +202,28 @@ astrbot_plugin_cyrene_memory/
 ## 许可
 
 MIT
+
+---
+
+## 开发注意：AstrBot LLM 工具参数类型
+
+AstrBot 4.28.2 的 `@filter.llm_tool` 装饰器在处理 `float` / `int` 等类型注解时，
+**会静默失败**（工具不注册，日志里只显示 `Added llm tool: <前一个工具>`，
+不报错）。经实测确认：
+
+| 类型 | 能否作为参数 |
+|---|---|
+| `str` | ✅ 稳定 |
+| `float` | ❌ 注册静默失败 |
+| `int` | ⚠️ 待验证，建议当 `str` 处理 |
+| `bool` | ⚠️ 待验证，建议当 `str` 处理 |
+
+**规则**：所有 LLM 工具的参数字段**一律用 `str` 声明**，在函数体内做 `int()` / `float()` 转换。
+默认值也必须是字符串形式（如 `importance: str = "0.5"`）。
+
+示例：
+```python
+@filter.llm_tool(name="my_tool")
+async def my_tool(self, event, value: str = "0.5"):
+    val = float(value) if value else 0.5
+    ...

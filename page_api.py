@@ -16,6 +16,8 @@ class CyrenePageApi:
         register(f"{PAGE_API_PREFIX}/l0", self.get_l0, ["GET"], "Cyrene L0 list")
         register(f"{PAGE_API_PREFIX}/l1", self.get_l1, ["GET"], "Cyrene L1 list")
         register(f"{PAGE_API_PREFIX}/l2", self.get_l2, ["GET"], "Cyrene L2 list")
+        register(f"{PAGE_API_PREFIX}/relationship", self.get_relationship, ["GET"], "Cyrene Relationship")
+        register(f"{PAGE_API_PREFIX}/tasks", self.get_tasks, ["GET"], "Cyrene Tasks")
         register(f"{PAGE_API_PREFIX}/l0/delete", self.del_l0, ["POST"], "Cyrene L0 delete")
         register(f"{PAGE_API_PREFIX}/l1/delete", self.del_l1, ["POST"], "Cyrene L1 delete")
         register(f"{PAGE_API_PREFIX}/l2/delete", self.del_l2, ["POST"], "Cyrene L2 delete")
@@ -28,9 +30,13 @@ class CyrenePageApi:
             n0 = conn.execute("SELECT COUNT(*) FROM l0_profile").fetchone()[0]
             n1 = conn.execute("SELECT COUNT(*) FROM l1_working").fetchone()[0]
             n2 = conn.execute("SELECT COUNT(*) FROM l2_events").fetchone()[0]
+            try:
+                nrel = conn.execute("SELECT COUNT(*) FROM relationship_state").fetchone()[0]
+            except Exception:
+                nrel = 0
         finally:
             conn.close()
-        return {"l0": n0, "l1": n1, "l2": n2}
+        return {"l0": n0, "l1": n1, "l2": n2, "rel": nrel}
 
     async def get_l0(self, *args, **kwargs):
         return {"items": self.plugin.storage.get_l0()}
@@ -53,7 +59,7 @@ class CyrenePageApi:
         conn.row_factory = sqlite3.Row
         try:
             rows = conn.execute(
-                "SELECT id, user_id, content, sentiment, tags, importance, created_at FROM l2_events ORDER BY id DESC LIMIT 200"
+                "SELECT id, user_id, content, sentiment, tags, importance, created_at, emotion_note FROM l2_events ORDER BY id DESC LIMIT 200"
             ).fetchall()
             return {"items": [dict(r) for r in rows]}
         finally:
@@ -99,3 +105,16 @@ class CyrenePageApi:
         finally:
             conn.close()
         return {"ok": True, "deleted": rid}
+
+    async def get_relationship(self, *args, **kwargs):
+        import sqlite3
+        conn = sqlite3.connect(self.plugin.storage.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute("SELECT * FROM relationship_state ORDER BY updated_at DESC").fetchall()
+            return {"items": [dict(r) for r in rows]}
+        finally:
+            conn.close()
+
+    async def get_tasks(self, *args, **kwargs):
+        return {"items": self.plugin.storage.get_all_tasks("110016396")}

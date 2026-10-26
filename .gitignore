@@ -1,25 +1,8 @@
-# Python
 __pycache__/
 *.py[cod]
-*$py.class
-*.egg-info/
 .venv/
 venv/
-.env
-
-# Local runtime data
 *.db
-*.sqlite
-*.sqlite3
-data/
-logs/
-
-# Editor / OS
-.vscode/
-.idea/
+*.db-journal
+*.log
 .DS_Store
-Thumbs.db
-
-# Build artifacts
-build/
-dist/
