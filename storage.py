@@ -46,36 +46,88 @@ class CyreneStorage:
         try:
             if user_id:
                 rows = conn.execute(
-                    "SELECT * FROM l0_profile WHERE user_id = ? ORDER BY category, key",
+                    "SELECT * FROM l0_profile WHERE user_id = ? ORDER BY updated_at DESC",
                     (user_id,)
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    "SELECT * FROM l0_profile ORDER BY user_id, category, key"
+                    "SELECT * FROM l0_profile ORDER BY updated_at DESC"
                 ).fetchall()
             return [dict(r) for r in rows]
         finally:
             conn.close()
 
     # ---------- L1 ----------
-    def append_l1(self, user_id: str, role: str, content: str, ttl_days: float = 7.0):
+    def append_raw_log(self, user_id: str, role: str, content: str, ttl_days: float = 7.0):
         now = time.time()
         conn = self._conn()
         try:
             conn.execute(
-                "INSERT INTO l1_working (user_id, role, content, created_at, expires_at) VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO raw_logs (user_id, role, content, created_at, expires_at) VALUES (?, ?, ?, ?, ?)",
                 (user_id, role, content, now, now + ttl_days * 86400)
             )
             conn.commit()
+            
+            # 自动归档检查
+            count = conn.execute("SELECT COUNT(*) FROM raw_logs").fetchone()[0]
+            if count >= 100:
+                self._archive_l1_batch(conn)
         finally:
             conn.close()
 
-    def get_l1(self, user_id: str, limit: int = 20):
+    def _archive_l1_batch(self, conn):
+        import os, zipfile, json, time
+        try:
+            # 每次只切最老的 50 条
+            rows = conn.execute("SELECT * FROM raw_logs ORDER BY created_at ASC LIMIT 50").fetchall()
+            if not rows:
+                return
+            
+            start_ts = rows[0]["created_at"]
+            end_ts = rows[-1]["created_at"]
+            fmt = "%Y%m%d_%H%M%S"
+            start_str = time.strftime(fmt, time.localtime(start_ts))
+            end_str = time.strftime(fmt, time.localtime(end_ts))
+            start_id = rows[0]["id"]
+            end_id = rows[-1]["id"]
+            
+            archive_dir = os.path.join(os.path.dirname(self.db_path), "archives")
+            os.makedirs(archive_dir, exist_ok=True)
+            
+            zip_name = f"l1_{start_str}__{end_str}_ID{start_id}-{end_id}.zip"
+            zip_path = os.path.join(archive_dir, zip_name)
+            jsonl_path = os.path.join(archive_dir, f"temp_{start_id}_{end_id}.jsonl")
+            
+            # 使用 print 写入，彻底避免换行符转义问题
+            with open(jsonl_path, "w", encoding="utf-8") as f_out:
+                for r in rows:
+                    print(json.dumps(dict(r), ensure_ascii=False), file=f_out)
+            
+            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+                zf.write(jsonl_path, os.path.basename(jsonl_path).replace("temp_", "l1_data_"))
+            
+            os.remove(jsonl_path)
+            
+            ids = [str(r["id"]) for r in rows]
+            conn.execute(f"DELETE FROM raw_logs WHERE id IN ({','.join(ids)})")
+            conn.commit()
+            print(f"[Cyrene Memory] 切片归档完成: {zip_name}")
+        except Exception as e:
+            print(f"[Cyrene Memory] 切片归档失败: {e}")
+
+    def get_archives(self):
+        import os
+        archive_dir = os.path.join(os.path.dirname(self.db_path), "archives")
+        if not os.path.exists(archive_dir): return []
+        return [f for f in os.listdir(archive_dir) if f.endswith('.zip')]
+
+
+    def get_raw_logs(self, user_id: str, limit: int = 20):
         now = time.time()
         conn = self._conn()
         try:
             rows = conn.execute(
-                "SELECT * FROM l1_working WHERE user_id = ? AND (expires_at IS NULL OR expires_at > ?) ORDER BY created_at DESC LIMIT ?",
+                "SELECT * FROM raw_logs WHERE user_id = ? AND (expires_at IS NULL OR expires_at > ?) ORDER BY created_at DESC LIMIT ?",
                 (user_id, now, limit)
             ).fetchall()
             return [dict(r) for r in rows][::-1]
@@ -222,5 +274,80 @@ class CyreneStorage:
         try:
             rows = conn.execute("SELECT record_id, vector FROM embeddings WHERE record_type = ?", (record_type,)).fetchall()
             return {r["record_id"]: r["vector"] for r in rows}
+        finally:
+            conn.close()
+
+    def search_archives(self, keyword: str, limit: int = 15):
+        """去压缩包冷数据里搜索相关对话"""
+        import os, zipfile, json
+        archive_dir = os.path.join(os.path.dirname(self.db_path), "archives")
+        if not os.path.exists(archive_dir):
+            return []
+            
+        results = []
+        # 按时间倒序（最新的包先搜）
+        files = sorted([f for f in os.listdir(archive_dir) if f.endswith('.zip')], reverse=True)
+        
+        for file in files:
+            if len(results) >= limit: break
+            file_path = os.path.join(archive_dir, file)
+            try:
+                with zipfile.ZipFile(file_path, 'r') as zf:
+                    for name in zf.namelist():
+                        if name.endswith('.jsonl'):
+                            with zf.open(name) as f:
+                                for line in f:
+                                    try:
+                                        row = json.loads(line.decode('utf-8'))
+                                        content = row.get('content', '')
+                                        if keyword.lower() in content.lower():
+                                            results.append(f"[来自归档 {file}] {row.get('role')}: {content}")
+                                            if len(results) >= limit:
+                                                return results
+                                    except Exception:
+                                        pass
+            except Exception as e:
+                pass
+        return results
+
+    # ---------- True L1 Working Memory ----------
+    def upsert_l1_working(self, user_id: str, key: str, value: str):
+        now = time.time()
+        conn = self._conn()
+        try:
+            # 检查是否存在该 key
+            row = conn.execute("SELECT id FROM l1_working WHERE user_id = ? AND key = ?", (user_id, key)).fetchone()
+            if row:
+                conn.execute("UPDATE l1_working SET value = ?, updated_at = ? WHERE id = ?", (value, now, row["id"]))
+            else:
+                conn.execute("INSERT INTO l1_working (user_id, key, value, updated_at) VALUES (?, ?, ?, ?)", (user_id, key, value, now))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def get_l1_working(self, user_id: str, limit: int = 20):
+        conn = self._conn()
+        try:
+            rows = conn.execute(
+                "SELECT id, key, value, updated_at FROM l1_working WHERE user_id = ? ORDER BY updated_at DESC LIMIT ?",
+                (user_id, limit)
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def delete_l1_working(self, row_id: int):
+        conn = self._conn()
+        try:
+            conn.execute("DELETE FROM l1_working WHERE id = ?", (row_id,))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def delete_l1_working_by_key(self, user_id: str, key: str):
+        conn = self._conn()
+        try:
+            conn.execute("DELETE FROM l1_working WHERE user_id = ? AND key = ?", (user_id, key))
+            conn.commit()
         finally:
             conn.close()

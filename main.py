@@ -261,6 +261,7 @@ class CyreneMemoryPlugin(Star):
             "2. 只在与当前对话相关时才使用；不相关就忽略。\n"
             "3. 标记为[群聊]的信息来自群聊场景，不要当作私聊原话引用。\n"
             "【强制记忆规则】在回复的同时，必须审视本轮对话：\n"
+            "- 【L1 冲突检查】：如果发现新的技术事实与上述 L1 冲突（如路径变化），必须使用 cyrene_update_working_memory，填写 old_key 进行覆盖融合！\n"
             "- 如果用户透露了长期偏好、习惯、身份，【必须调用】cyrene_update_profile。\n"
             "- 如果用户完成了某事、发生了情绪波动，【必须调用】cyrene_record_event。\n"
             "- 如果涉及复杂的排查、开发、配置，或者之前挂起的任务有进展，【必须调用】cyrene_update_task。\n"
@@ -347,9 +348,9 @@ class CyreneMemoryPlugin(Star):
             pass
 
         try:
-            self.storage.append_l1(user_id, "user", user_text)
+            self.storage.append_raw_log(user_id, "user", user_text)
             if assistant_text:
-                self.storage.append_l1(user_id, "assistant", assistant_text)
+                self.storage.append_raw_log(user_id, "assistant", assistant_text)
             
             # 检查是否需要触发后台反思
             refl_cfg = self.config.get("reflection", {})
@@ -378,12 +379,20 @@ class CyreneMemoryPlugin(Star):
     async def cyrene_update_profile(self, event: AstrMessageEvent,
                                      category: str, key: str, value: str):
         '''更新"用户本人"的核心画像（L0）或关系状态。
-        只要用户的发言中透露了他们的习惯、偏好、技术栈、身份背景，或者关系出现变化，【必须立即调用本工具记录】。
-        不要等用户明确说"请记住"，主动提炼信息是你的职责。
+        你的职责是提炼【长期的、静态的、未来每次对话都可能用到的事实】，作为常驻背景。
+
+        **分类指南**：
+        1. identity/preference/taboo/relationship：记录用户的性格、称呼、禁忌、关系状态。
+        2. environment：**工程基建字典**。记录项目的绝对路径、容器的名称、IP 地址、端口号、API Key 等环境事实。
+
+        **严格约束**：
+        - environment 必须写成极其简练的【键值对】事实。
+        - 绝不要把流水账写进 L0，只提取不变的客观事实。
+        - **如何修正旧事实**：当你发现旧事实发生变更（如 IP 变了、路径改了），**必须使用完全相同的 key 再次调用本工具**。系统底层会自动覆盖旧值，不要新建一个似是而非的 key。
 
         Args:
-            category (string): 分类，从 identity/preference/taboo/relationship/environment 中选一个。环境配置（如代理网关、特定路径、服务器设置）必须用 environment。
-            key (string): 简短键名，例如 "用户称呼"、"喜欢的食物"、"关系阶段"
+            category (string): 分类，从 identity/preference/taboo/relationship/environment 中选一个
+            key (string): 简短键名，例如 "用户称呼"、"网关IP"、"C项目路径"
             value (string): 具体值，用简洁的自然语言描述
         '''
         user_id = event.get_sender_id()
@@ -533,6 +542,42 @@ class CyreneMemoryPlugin(Star):
                 
             # 标记已反思
             self.storage.mark_l1_reflected([m['id'] for m in messages])
+            
+            # 归档清理逻辑
+            import sqlite3, json, os, zipfile, time
+            conn = sqlite3.connect(self.storage.db_path)
+            conn.row_factory = sqlite3.Row
+            try:
+                rows = conn.execute("""
+                    SELECT * FROM l1_working 
+                    WHERE is_reflected = 1 
+                    AND id NOT IN (SELECT id FROM l1_working ORDER BY id DESC LIMIT 50)
+                """).fetchall()
+                
+                if rows:
+                    archive_dir = os.path.join(os.path.dirname(self.storage.db_path), "archives")
+                    os.makedirs(archive_dir, exist_ok=True)
+                    date_str = time.strftime("%Y%m%d_%H%M%S")
+                    jsonl_path = os.path.join(archive_dir, f"l1_archive_{date_str}.jsonl")
+                    zip_path = os.path.join(archive_dir, f"l1_archive_{date_str}.zip")
+                    
+                    with open(jsonl_path, "w", encoding="utf-8") as f_json:
+                        for r in rows:
+                            f_json.write(json.dumps(dict(r), ensure_ascii=False) + "\n")
+                    
+                    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                        zipf.write(jsonl_path, os.path.basename(jsonl_path))
+                    
+                    os.remove(jsonl_path)
+                    
+                    ids_to_delete = [str(r["id"]) for r in rows]
+                    conn.execute(f"DELETE FROM l1_working WHERE id IN ({','.join(ids_to_delete)})")
+                    conn.commit()
+                    logger.info(f"[Cyrene Memory] 已归档并清理 {len(rows)} 条 L1 数据至 {zip_path}")
+            except Exception as e:
+                logger.warning(f"[Cyrene Memory] L1 归档失败: {e}")
+            finally:
+                conn.close()
         except Exception as e:
             logger.error(f"[Cyrene Memory] 解析反思结果失败: {e}, 原始输出: {result_text}")
 
@@ -585,3 +630,265 @@ class CyreneMemoryPlugin(Star):
         self.storage.upsert_task(user_id, title, status, summary)
         logger.info(f"[Cyrene Memory] Task 更新: {title} [{status}]")
         yield f"已更新任务：[{status}] {title}"
+
+    @filter.llm_tool(name="cyrene_update_working_memory")
+    async def cyrene_update_working_memory(self, event: AstrMessageEvent, key: str, value: str, old_key: str = ""):
+        '''更新当前的工作记忆（L1）。
+        
+        当用户在讨论具体的技术排查、项目文件路径、正在修改的代码、临时配置时，【必须调用本工具记录工作状态】。
+
+        **重要纠错功能**：
+        如果你在对话中发现新事实与旧的记忆发生了冲突（比如路径变了、IP 换了），请使用融合逻辑：
+        1. 提取旧记忆中有用的其他信息，与新信息合并。
+        2. 将合并后的最新完整事实填入 `value`。
+        3. 将过时的旧记忆的键名填入 `old_key`。系统会自动将旧条目删除，避免冲突。
+        4. 如果没有冲突，或者只是新增，请将 `old_key` 留空。
+
+        Args:
+            key (string): 新记忆的键名，如 "C项目路径"、"当前报错"
+            value (string): 融合了新旧信息后最准确的值
+            old_key (string): 需要被覆盖/删除的旧冲突键名（如果没有冲突则不填）
+        '''
+        user_id = event.get_sender_id()
+        if not user_id:
+            yield "无法识别用户。"
+            return
+            
+        # 如果传了 old_key，且与 key 不同，执行融合纠错（删掉旧条目）
+        if old_key and old_key.strip() != "" and old_key != key:
+            self.storage.delete_l1_working_by_key(user_id, old_key.strip())
+            logger.info(f"[Cyrene Memory] L1 融合纠错: 已删除过时记忆 {old_key}")
+            
+        self.storage.upsert_l1_working(user_id, key, value)
+        logger.info(f"[Cyrene Memory] L1 工作记忆写入: {key} = {value}")
+        yield f"已更新工作记忆：{key}"
+
+    @filter.command("cyrene_webui")
+    async def cyrene_webui(self, event: AstrMessageEvent):
+        """提示 WebUI 页面访问路径"""
+        if not getattr(self, "page_api", None):
+            yield event.plain_result("页面 API 未注册（AstrBot 版本不支持或注册失败）。")
+            return
+        yield event.plain_result(
+            "Cyrene Memory 页面已挂载。\n"
+            "入口：AstrBot 后台 → 插件 → astrbot_plugin_cyrene_memory → 页面/dashboard\n"
+            "API 前缀：/astrbot_plugin_cyrene_memory/page"
+        )
+
+
+    @filter.command("cyrene_l1_clear")
+    async def cyrene_l1_clear(self, event: AstrMessageEvent):
+        """清空当前用户的 L1（调试用）"""
+        import sqlite3
+        user_id = event.get_sender_id()
+        conn = sqlite3.connect(self.storage.db_path)
+        try:
+            n = conn.execute("DELETE FROM l1_working WHERE user_id = ?", (user_id,)).rowcount
+            conn.commit()
+            yield event.plain_result(f"已清空 L1: user={user_id}, 删除 {n} 条")
+        finally:
+            conn.close()
+
+
+    @filter.llm_tool(name="cyrene_record_event")
+    async def cyrene_record_event(self, event: AstrMessageEvent,
+                                   content: str, sentiment: str = "neutral",
+                                   tags: str = "", importance: str = "0.5",
+                                   emotion_note: str = ""):
+        '''记录一条长期事件到 L2（Episodic Memory）。
+        只要用户提到了【做成了某件事、遇到了挫折、情绪有明显的起伏】，就可以调用。
+        重点记录【这件事对人的意味着什么】以及【他当时的感受】，避免纯技术流水账。
+
+        Args:
+            content (string): 一句话事件描述，聚焦于"人和故事"，例如"用户终于解决困扰三天的 bug"
+            sentiment (string): 情感倾向，从 positive/neutral/negative 中选
+            tags (string): 逗号分隔的标签，如"开发,里程碑"
+            importance (float): 重要度 0.0-1.0
+            emotion_note (string): 用一句话记录"用户当时是什么心情"，带点画面感，20字以内。
+        '''
+        user_id = event.get_sender_id()
+        if not user_id:
+            yield "无法识别用户，未记录。"
+            return
+        import json
+        tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
+        senti = sentiment if sentiment in ("positive", "neutral", "negative") else "neutral"
+        imp = max(0.0, min(1.0, float(importance) if importance else 0.5))
+        rid = self.storage.append_l2(
+            user_id=user_id,
+            content=content,
+            importance=imp,
+            sentiment=senti,
+            tags=json.dumps(tag_list, ensure_ascii=False),
+            emotion_note=(emotion_note or "").strip()[:40],
+        )
+        # 只要有情绪标签，立刻更新近期关系氛围
+        if emotion_note:
+            self.storage.update_relationship(user_id, recent_mood=emotion_note[:20])
+        logger.info(f"[Cyrene Memory] L2 写入: user={user_id} [{senti}] imp={imp} {content}")
+        yield f"已记录 L2 事件：{content}"
+
+    @filter.command("cyrene_l2_clear")
+    async def cyrene_l2_clear(self, event: AstrMessageEvent):
+        """清空当前用户的 L2（调试用）"""
+        import sqlite3
+        user_id = event.get_sender_id()
+        conn = sqlite3.connect(self.storage.db_path)
+        try:
+            n = conn.execute("DELETE FROM l2_events WHERE user_id = ?", (user_id,)).rowcount
+            conn.commit()
+            yield event.plain_result(f"已清空 L2: user={user_id}, 删除 {n} 条")
+        finally:
+            conn.close()
+
+    # ================= 反思引擎 =================
+    async def _run_reflection(self, user_id: str, messages: list, config: dict):
+        """后台异步反思任务"""
+        logger.info(f"[Cyrene Memory] 启动后台反思, 用户={user_id}, 消息数={len(messages)}")
+        
+        text_dump = "\n".join([f"{m['role']}: {m['content']}" for m in messages])
+        prompt = f"""请分析以下对话记录，提取值得长期记忆的事实。
+严格按照 JSON 格式输出，不要包含 Markdown 代码块以外的任何内容。
+格式：
+{{
+  "l0": [{{"category": "environment/preference/identity", "key": "简短键名", "value": "具体事实"}}],
+  "l2": [{{"content": "事件描述", "sentiment": "positive/negative/neutral", "importance": 0.6}}]
+}}
+如果某类没有内容，返回空数组 []。
+
+对话记录：
+{text_dump}
+"""
+        primary = config.get("primary_provider_id", "")
+        fallback = config.get("fallback_provider_id", "")
+        max_retries = config.get("max_retries", 3)
+
+        result_text = await self._call_llm_with_retry(prompt, primary, fallback, max_retries)
+        if not result_text:
+            logger.error("[Cyrene Memory] 反思失败，无法获取模型输出")
+            return
+
+        # 解析 JSON 并写入
+        import json, re
+        try:
+            # 提取 JSON 块
+            match = re.search(r'\{.*\}', result_text, re.DOTALL)
+            if match:
+                data = json.loads(match.group(0))
+                if "l0" in data:
+                    for item in data["l0"]:
+                        self.storage.upsert_l0(user_id, item.get("category", "preference"), item.get("key", "未知"), item.get("value", ""))
+                if "l2" in data:
+                    for item in data["l2"]:
+                        self.storage.append_l2(user_id, item.get("content", ""), importance=float(item.get("importance", 0.5)), sentiment=item.get("sentiment", "neutral"))
+                logger.info(f"[Cyrene Memory] 反思完成: L0 写入 {len(data.get('l0', []))} 条, L2 写入 {len(data.get('l2', []))} 条")
+                
+            # 标记已反思
+            self.storage.mark_l1_reflected([m['id'] for m in messages])
+            
+            # 归档清理逻辑
+            import sqlite3, json, os, zipfile, time
+            conn = sqlite3.connect(self.storage.db_path)
+            conn.row_factory = sqlite3.Row
+            try:
+                rows = conn.execute("""
+                    SELECT * FROM l1_working 
+                    WHERE is_reflected = 1 
+                    AND id NOT IN (SELECT id FROM l1_working ORDER BY id DESC LIMIT 50)
+                """).fetchall()
+                
+                if rows:
+                    archive_dir = os.path.join(os.path.dirname(self.storage.db_path), "archives")
+                    os.makedirs(archive_dir, exist_ok=True)
+                    date_str = time.strftime("%Y%m%d_%H%M%S")
+                    jsonl_path = os.path.join(archive_dir, f"l1_archive_{date_str}.jsonl")
+                    zip_path = os.path.join(archive_dir, f"l1_archive_{date_str}.zip")
+                    
+                    with open(jsonl_path, "w", encoding="utf-8") as f_json:
+                        for r in rows:
+                            f_json.write(json.dumps(dict(r), ensure_ascii=False) + "\n")
+                    
+                    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                        zipf.write(jsonl_path, os.path.basename(jsonl_path))
+                    
+                    os.remove(jsonl_path)
+                    
+                    ids_to_delete = [str(r["id"]) for r in rows]
+                    conn.execute(f"DELETE FROM l1_working WHERE id IN ({','.join(ids_to_delete)})")
+                    conn.commit()
+                    logger.info(f"[Cyrene Memory] 已归档并清理 {len(rows)} 条 L1 数据至 {zip_path}")
+            except Exception as e:
+                logger.warning(f"[Cyrene Memory] L1 归档失败: {e}")
+            finally:
+                conn.close()
+        except Exception as e:
+            logger.error(f"[Cyrene Memory] 解析反思结果失败: {e}, 原始输出: {result_text}")
+
+    async def _call_llm_with_retry(self, prompt: str, primary: str, fallback: str, max_retries: int):
+        """带重试和回退的模型调用"""
+        import asyncio
+        providers = []
+        if primary:
+            p = self.context.get_provider(primary)
+            if p: providers.append(p)
+        if fallback:
+            p = self.context.get_provider(fallback)
+            if p: providers.append(p)
+        
+        # 如果都没配，用默认
+        if not providers:
+            p = self.context.get_using_provider()
+            if p: providers.append(p)
+
+        for provider in providers:
+            for attempt in range(max_retries):
+                try:
+                    resp = await provider.text_chat(prompt=prompt)
+                    if resp and resp.completion_text:
+                        return resp.completion_text
+                except Exception as e:
+                    logger.warning(f"[Cyrene Memory] 反思调用失败 ({provider.meta().id}), 第 {attempt+1} 次重试: {e}")
+                    await asyncio.sleep(2)
+        return ""
+
+    @filter.llm_tool(name="cyrene_update_task")
+    async def cyrene_update_task(self, event: AstrMessageEvent, 
+                                 title: str, summary: str, status: str = "active"):
+        '''更新或创建一个长线任务（Task Board）。
+        
+        触发条件：当用户要求进行复杂的、多步骤的排查、写代码、配置环境时，【必须立即调用本工具创建任务】。
+        当任务有新的进展、或者遇到阻碍时，更新 summary 并保持 active/paused。
+        当任务彻底完成时，将 status 设为 "done"。
+
+        Args:
+            title (string): 任务核心标题，如 "配置 MCP 通信"、"排查安卓构建"
+            summary (string): 当前最新的进度摘要，包含卡点或关键结论
+            status (string): 状态，从 active/paused/done 中选一个
+        '''
+        user_id = event.get_sender_id()
+        if not user_id:
+            yield "无法识别用户，未记录。"
+            return
+        
+        self.storage.upsert_task(user_id, title, status, summary)
+        logger.info(f"[Cyrene Memory] Task 更新: {title} [{status}]")
+        yield f"已更新任务：[{status}] {title}"
+
+    @filter.llm_tool(name="cyrene_update_working_memory")
+    async def cyrene_update_working_memory(self, event: AstrMessageEvent, key: str, value: str):
+        '''更新当前的工作记忆（L1）。
+        
+        当用户在讨论具体的技术排查、项目文件路径、正在修改的代码、临时配置时，【必须调用本工具记录工作状态】。
+        这里专门用来存 L0 (画像) 和 L2 (故事) 装不下的、属于【当前工作台】的流水账和状态。
+        
+        Args:
+            key (string): 工作记忆的键名，如 "C项目路径"、"当前报错"、"MCP配置"
+            value (string): 具体的状态或值
+        '''
+        user_id = event.get_sender_id()
+        if not user_id:
+            yield "无法识别用户。"
+            return
+        self.storage.upsert_l1_working(user_id, key, value)
+        logger.info(f"[Cyrene Memory] L1 工作记忆写入: {key} = {value}")
+        yield f"已更新工作记忆：{key}"
