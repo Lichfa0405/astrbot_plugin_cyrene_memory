@@ -15,8 +15,99 @@ class CyreneStorage:
     def __init__(self, db_path: str = DB_PATH):
         self.db_path = db_path
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
-        if not os.path.exists(db_path):
-            logger.warning(f"[Cyrene Memory] 新库不存在: {db_path}")
+        self._init_db()
+
+    def _init_db(self):
+        conn = self._conn()
+        try:
+            # L0 画像
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS l0_profile (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id TEXT NOT NULL,
+                    category TEXT NOT NULL,
+                    key TEXT NOT NULL,
+                    value TEXT NOT NULL,
+                    confidence REAL DEFAULT 0.8,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    UNIQUE(user_id, category, key)
+                )
+            """)
+            # L1 真正的当前工作记忆
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS l1_working (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id TEXT NOT NULL,
+                    key TEXT NOT NULL,
+                    value TEXT NOT NULL,
+                    updated_at REAL
+                )
+            """)
+            # L2 长期事件
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS l2_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id TEXT NOT NULL,
+                    event_time REAL,
+                    content TEXT NOT NULL,
+                    entities TEXT DEFAULT '[]',
+                    sentiment TEXT,
+                    tags TEXT DEFAULT '[]',
+                    importance REAL DEFAULT 0.5,
+                    created_at REAL NOT NULL,
+                    emotion_note TEXT DEFAULT ''
+                )
+            """)
+            # Raw Logs 原始流水账
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS raw_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    expires_at REAL,
+                    is_reflected INTEGER DEFAULT 0
+                )
+            """)
+            # Tasks 任务看板
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS tasks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    status TEXT DEFAULT 'active',
+                    summary TEXT,
+                    created_at REAL,
+                    updated_at REAL
+                )
+            """)
+            # Relationship 关系状态
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS relationship_state (
+                    user_id TEXT PRIMARY KEY,
+                    stage TEXT DEFAULT '初识',
+                    recent_mood TEXT DEFAULT '平稳',
+                    updated_at REAL
+                )
+            """)
+            # Embeddings 向量索引
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS embeddings (
+                    record_id INTEGER NOT NULL,
+                    record_type TEXT NOT NULL,
+                    vector BLOB NOT NULL,
+                    updated_at REAL
+                )
+            """)
+            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_emb_record ON embeddings(record_id, record_type)")
+            conn.commit()
+            logger.info("[Cyrene Memory] 数据库表结构初始化/检查完成。")
+        except Exception as e:
+            logger.error(f"[Cyrene Memory] 数据库初始化失败: {e}")
+        finally:
+            conn.close()
 
     def _conn(self):
         conn = sqlite3.connect(self.db_path)

@@ -9,7 +9,7 @@ from .embedding_engine import EmbeddingEngine, vector_to_blob, blob_to_vector, c
 from .page_api import CyrenePageApi
 
 
-@register("astrbot_plugin_cyrene_memory", "EGO", "基于 Cyrene Agent 理念的分层记忆插件，只读兼容 LivingMemory", "v0.1.0", "")
+@register("astrbot_plugin_cyrene_memory", "Lichfa0405", "基于 Cyrene Agent 理念的分层记忆插件，只读兼容 LivingMemory", "v1.0.0", "https://github.com/Lichfa0405/astrbot_plugin_cyrene_memory")
 class CyreneMemoryPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
