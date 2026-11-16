@@ -85,10 +85,10 @@
       throw new Error("等待 AstrBotPluginPage bridge 超时");
     }
 
-    async function apiGet(path) {
+    async function apiGet(path, params = {}) {
       const bridge = await waitBridge();
       if (bridge.ready) { try { await bridge.ready(); } catch (e) {} }
-      return bridge.apiGet(path, {});
+      return bridge.apiGet(path, params);
     }
 
     async function apiPost(path, body) {
@@ -128,6 +128,8 @@
               <button class="btn-edit" data-id="${r.id}" data-val="${esc(r.value)}">编辑</button>
               <button class="btn-simp" data-id="${r.id}" data-val="${esc(r.value)}">精简</button>
               <button class="btn-sum" data-id="${r.id}" data-cat="${esc(r.category)}" data-key="${esc(r.key)}" data-val="${esc(r.value)}">重总结</button>
+              <button class="btn-move" data-target="l1" data-id="${r.id}" style="background:#3a5a7a;">移入L1</button>
+              <button class="btn-move" data-target="l2" data-id="${r.id}" style="background:#5a7a3a;">移入L2</button>
               <button class="btn-del" data-kind="l0" data-id="${r.id}">删除</button>
             </td>
           </tr>`).join("") + `</tbody></table>`;
@@ -241,89 +243,158 @@
       });
     });
 
-    document.body.addEventListener("click", async (e) => {
-      // 1. 编辑
-      const btnEdit = e.target.closest(".btn-edit");
-      if (btnEdit) {
-        const id = btnEdit.dataset.id;
-        const oldVal = btnEdit.dataset.val;
-        const newVal = prompt("修改内容:", oldVal);
-        if (newVal !== null && newVal !== oldVal) {
-          btnEdit.innerText = "...";
-          try {
-            const res = await apiPost("page/l0/update", { id: Number(id), value: newVal });
-            if (res.ok) document.getElementById("val-" + id).innerText = res.value;
-          } catch(err) { alert("修改失败"); }
-          btnEdit.innerText = "编辑";
+    function showToast(msg, isError = false) {
+  const t = document.getElementById("toast-msg");
+  t.innerText = msg;
+  t.style.background = isError ? "#8a3a3a" : "#3a7a5a";
+  t.style.display = "block";
+  setTimeout(() => { t.style.display = "none"; }, 3000);
+}
+
+document.body.addEventListener("click", async (e) => {
+  
+  // 1. 编辑
+  const btnEdit = e.target.closest(".btn-edit");
+  if (btnEdit) {
+    const id = btnEdit.dataset.id;
+    const td = document.getElementById("val-" + id);
+    const oldVal = btnEdit.dataset.val;
+    
+    td.innerHTML = `<input type="text" id="input-${id}" value="${esc(oldVal)}" style="width:100%; background:#333; color:#fff; border:1px solid var(--accent); padding:4px;" />`;
+    const input = document.getElementById("input-" + id);
+    input.focus();
+    
+    let isSaved = false;
+    const saveEdit = async () => {
+      if (isSaved) return;
+      isSaved = true;
+      const newVal = input.value;
+      if (newVal !== oldVal) {
+        try {
+          const res = await apiGet("page/l0_update", { id: Number(id), value: newVal });
+          if (res.ok) {
+            td.innerText = res.value;
+            btnEdit.dataset.val = res.value;
+            showToast("✅ 修改成功");
+          } else {
+            showToast("❌ 失败: " + (res.msg || "未知错误"), true);
+            td.innerText = oldVal;
+          }
+        } catch(err) { 
+          showToast("❌ 请求失败: " + err.message, true); 
+          td.innerText = oldVal;
         }
-        return;
+      } else {
+        td.innerText = oldVal;
       }
-
-      // 2. 精简
-      const btnSimp = e.target.closest(".btn-simp");
-      if (btnSimp) {
-        const id = btnSimp.dataset.id;
-        const oldVal = btnSimp.dataset.val;
-        btnSimp.innerText = "处理中...";
-        btnSimp.disabled = true;
-        try {
-          const res = await apiPost("page/l0/simplify", { id: Number(id), value: oldVal });
-          if (res.ok) {
-            document.getElementById("val-" + id).innerText = res.value;
-            btnSimp.dataset.val = res.value;
-          } else alert(res.msg || "精简失败");
-        } catch(err) { alert("请求失败"); }
-        btnSimp.innerText = "精简";
-        btnSimp.disabled = false;
-        return;
-      }
-
-      // 3. 重总结
-      const btnSum = e.target.closest(".btn-sum");
-      if (btnSum) {
-        const id = btnSum.dataset.id;
-        const cat = btnSum.dataset.cat;
-        const key = btnSum.dataset.key;
-        const oldVal = btnSum.dataset.val;
-        btnSum.innerText = "翻找中...";
-        btnSum.disabled = true;
-        try {
-          const res = await apiPost("page/l0/summarize", { id: Number(id), category: cat, key: key, value: oldVal });
-          if (res.ok) {
-            document.getElementById("val-" + id).innerText = res.value;
-            btnSum.dataset.val = res.value;
-          } else alert(res.msg || "总结失败");
-        } catch(err) { alert("请求超时或失败"); }
-        btnSum.innerText = "重总结";
-        btnSum.disabled = false;
-        return;
-      }
-
-      // 4. 删除
-      const btnDel = e.target.closest(".btn-del");
-      if (btnDel) {
-        if (!confirm("确认删除这条记录？")) return;
-        const kind = btnDel.dataset.kind;
-        const id = btnDel.dataset.id;
-        try {
-          await apiPost(`page/${kind}/delete`, { id: Number(id) });
-          if (kind === "l0") loadL0();
-          else if (kind === "l1") loadL1();
-          else loadL2();
-          loadStats();
-        } catch(err) { alert("删除失败: " + err.message); }
-        return;
-      }
-
-      // 5. 归档包点击
-      const archiveBtn = e.target.closest(".archive-btn");
-      if (archiveBtn) {
-        alert("提示：由于 AstrBot 路由限制，请前往服务器目录 /root/astrbot-data/data/plugin_data/astrbot_plugin_cyrene_memory/archives/ 获取该文件。");
-        return;
-      }
+    };
+    
+    input.addEventListener("blur", saveEdit);
+    input.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter") { input.blur(); }
     });
+    return;
+  }
 
-    // --- 初始化 ---
+  // 2. 精简
+  const btnSimp = e.target.closest(".btn-simp");
+  if (btnSimp) {
+    const id = btnSimp.dataset.id;
+    const oldVal = btnSimp.dataset.val;
+    btnSimp.innerText = "...";
+    btnSimp.disabled = true;
+    try {
+      const res = await apiGet("page/l0_simplify", { id: Number(id), value: oldVal });
+      if (res.ok) {
+        document.getElementById("val-" + id).innerText = res.value;
+        btnSimp.dataset.val = res.value;
+        showToast("✨ 精简成功");
+      } else showToast("❌ 失败: " + res.msg, true);
+    } catch(err) { showToast("❌ 请求失败", true); }
+    btnSimp.innerText = "精简";
+    btnSimp.disabled = false;
+    return;
+  }
+
+  // 3. 重总结
+  const btnSum = e.target.closest(".btn-sum");
+  if (btnSum) {
+    const id = btnSum.dataset.id;
+    const cat = btnSum.dataset.cat;
+    const key = btnSum.dataset.key;
+    const oldVal = btnSum.dataset.val;
+    btnSum.innerText = "翻找中...";
+    btnSum.disabled = true;
+    try {
+      const res = await apiGet("page/l0_summarize", { id: Number(id), category: cat, key: key, value: oldVal });
+      if (res.ok) {
+        document.getElementById("val-" + id).innerText = res.value;
+        btnSum.dataset.val = res.value;
+        showToast("🔍 重总结完成");
+      } else showToast("❌ 失败: " + res.msg, true);
+    } catch(err) { showToast("❌ 请求超时或失败", true); }
+    btnSum.innerText = "重总结";
+    btnSum.disabled = false;
+    return;
+  }
+
+  // 4. 移入 L1 / L2
+  const btnMove = e.target.closest(".btn-move");
+  if (btnMove) {
+    const id = btnMove.dataset.id;
+    const target = btnMove.dataset.target;
+    
+    const oldText = btnMove.innerText;
+    btnMove.innerText = "移动中...";
+    btnMove.disabled = true;
+    try {
+      const res = await apiGet("page/l0_move", { id: Number(id), target: target });
+      if (res.ok) {
+        showToast("📦 已移入 " + target.toUpperCase());
+        loadL0();
+        loadStats();
+        if (target === 'l1') loadL1();
+        else loadL2();
+      } else {
+        showToast("❌ 移动失败: " + res.msg, true);
+        btnMove.innerText = oldText;
+        btnMove.disabled = false;
+      }
+    } catch(err) { 
+      showToast("❌ 请求失败: " + err.message, true); 
+      btnMove.innerText = oldText;
+      btnMove.disabled = false;
+    }
+    return;
+  }
+
+  // 5. 删除
+  const btnDel = e.target.closest(".btn-del");
+  if (btnDel) {
+    const kind = btnDel.dataset.kind;
+    const id = btnDel.dataset.id;
+    btnDel.innerText = "...";
+    btnDel.disabled = true;
+    try {
+      const res = await apiGet(`page/${kind}_delete`, { id: Number(id) });
+      showToast("🗑️ 已删除");
+      if (kind === "l0") loadL0();
+      else if (kind === "l1") loadL1();
+      else loadL2();
+      loadStats();
+    } catch(err) { showToast("❌ 删除失败", true); }
+    return;
+  }
+
+  // 6. 归档包点击
+  const archiveBtn = e.target.closest(".archive-btn");
+  if (archiveBtn) {
+    showToast("💡 请前往服务器目录获取该 zip 文件");
+    return;
+  }
+});
+
+// --- 初始化 ---
     loadStats();
     loadL0();
     loadL1();
@@ -332,5 +403,6 @@
     loadRel();
     loadTasks();
   </script>
+  <div id="toast-msg" style="position:fixed; top:20px; right:20px; background:#3a7a5a; color:#fff; padding:10px 20px; border-radius:4px; display:none; z-index:9999; box-shadow:0 4px 12px rgba(0,0,0,0.5);"></div>
 </body>
 </html>
