@@ -138,11 +138,6 @@ class CyrenePageApi:
     async def get_tasks(self, *args, **kwargs):
         return {"items": self.plugin.storage.get_all_tasks("110016396")}
 
-    async def update_l0(self, *args, **kwargs):
-        payload = kwargs.get("payload") or (args[0] if args else {})
-        rid = payload.get("id")
-        val = payload.get("value")
-        if not rid: return {"ok": False}
         import sqlite3, time
         conn = sqlite3.connect(self.plugin.storage.db_path)
         try:

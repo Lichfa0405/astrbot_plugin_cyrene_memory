@@ -534,7 +534,15 @@ class CyreneMemoryPlugin(Star):
                 data = json.loads(match.group(0))
                 if "l0" in data:
                     for item in data["l0"]:
-                        self.storage.upsert_l0(user_id, item.get("category", "preference"), item.get("key", "未知"), item.get("value", ""))
+                        _k = item.get("key", "未知")
+                        _v = item.get("value", "")
+                        _c = item.get("category", "preference")
+                        # 硬性拦截：超过 40 字属于工作记忆，不配进 L0，自动降级到 L1
+                        if len(_v) > 40:
+                            self.storage.upsert_l1_working(user_id, _k, _v)
+                            logger.info(f"[反思] 拦截过长 L0，已自动降级至 L1: {_k}")
+                        else:
+                            self.storage.upsert_l0(user_id, _c, _k, _v)
                 if "l2" in data:
                     for item in data["l2"]:
                         self.storage.append_l2(user_id, item.get("content", ""), importance=float(item.get("importance", 0.5)), sentiment=item.get("sentiment", "neutral"))
@@ -777,7 +785,15 @@ class CyreneMemoryPlugin(Star):
                 data = json.loads(match.group(0))
                 if "l0" in data:
                     for item in data["l0"]:
-                        self.storage.upsert_l0(user_id, item.get("category", "preference"), item.get("key", "未知"), item.get("value", ""))
+                        _k = item.get("key", "未知")
+                        _v = item.get("value", "")
+                        _c = item.get("category", "preference")
+                        # 硬性拦截：超过 40 字属于工作记忆，不配进 L0，自动降级到 L1
+                        if len(_v) > 40:
+                            self.storage.upsert_l1_working(user_id, _k, _v)
+                            logger.info(f"[反思] 拦截过长 L0，已自动降级至 L1: {_k}")
+                        else:
+                            self.storage.upsert_l0(user_id, _c, _k, _v)
                 if "l2" in data:
                     for item in data["l2"]:
                         self.storage.append_l2(user_id, item.get("content", ""), importance=float(item.get("importance", 0.5)), sentiment=item.get("sentiment", "neutral"))
