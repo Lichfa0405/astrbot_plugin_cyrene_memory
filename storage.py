@@ -288,7 +288,7 @@ class CyreneStorage:
         conn = self._conn()
         try:
             rows = conn.execute(
-                "SELECT id, role, content FROM l1_working WHERE user_id = ? AND is_reflected = 0 ORDER BY id ASC LIMIT ?",
+                "SELECT id, role, content FROM raw_logs WHERE user_id = ? AND is_reflected = 0 ORDER BY id ASC LIMIT ?",
                 (user_id, limit)
             ).fetchall()
             return [dict(r) for r in rows]
@@ -300,7 +300,7 @@ class CyreneStorage:
         conn = self._conn()
         try:
             placeholders = ','.join('?' * len(ids))
-            conn.execute(f"UPDATE l1_working SET is_reflected = 1 WHERE id IN ({placeholders})", ids)
+            conn.execute(f"UPDATE raw_logs SET is_reflected = 1 WHERE id IN ({placeholders})", ids)
             conn.commit()
         finally:
             conn.close()
