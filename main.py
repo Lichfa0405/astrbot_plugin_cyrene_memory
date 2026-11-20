@@ -679,7 +679,7 @@ class CyreneMemoryPlugin(Star):
         2. environment：**工程基建字典**。记录项目的绝对路径、容器的名称、IP 地址、端口号、API Key 等环境事实。
 
         **严格约束**：
-        - **单条 value 必须控制在 40 字以内**（硬限制）。超长内容会被自动降级到 L1 工作记忆，无法进入 L0。需要写长内容时，改用 cyrene_update_working_memory。
+        - **单条 value 要简短**：上限 environment 120 字，identity/preference/relationship 300 字，taboo 200 字。超过上限或含两段以上换行的内容会被自动降级到 L1 工作记忆，无法进入 L0。确实要写长内容时，改用 cyrene_update_working_memory。
         - environment 必须写成极其简练的【键值对】事实。
         - 绝不要把流水账写进 L0，只提取不变的客观事实。
         - **如何修正旧事实**：当你发现旧事实发生变更（如 IP 变了、路径改了），**必须使用完全相同的 key 再次调用本工具**。系统底层会自动覆盖旧值，不要新建一个似是而非的 key。
@@ -796,6 +796,42 @@ class CyreneMemoryPlugin(Star):
             if best is None or s > best["score"]:
                 best = {"id": r["rid"], "content": r["content"], "score": s}
         if best and best["score"] >= 0.80:
+            return best
+        return None
+
+    async def _find_similar_l1(self, user_id: str, key: str, value: str):
+        """写入前撞库：找语义相近但 key 不同的既有 L1 条目（阈值 0.85）。
+
+        只用于提示，不自动合并 —— 两条 L1 可能是同一件事的不同阶段
+        （比如「当前报错」和「已解决的报错」），都该留着。
+        阈值比 L2 的 0.80 更严：L1 条目本身就是短事实，容易互相误伤。
+        """
+        if not getattr(self, "embedder", None) or not getattr(self.embedder, "enabled", False):
+            return None
+        try:
+            vec = await self.embedder.get_embedding(f"{key}: {value}")
+        except Exception as e:
+            logger.warning(f"[Cyrene Memory] L1 撞库向量化失败: {e}")
+            return None
+        if not vec:
+            return None
+        conn = sqlite3.connect(self.storage.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute("""
+                SELECT e.record_id AS rid, e.vector AS vec, l.key AS key, l.value AS value
+                  FROM embeddings e
+                  JOIN l1_working l ON l.id = e.record_id
+                 WHERE e.record_type = 'l1' AND l.user_id = ? AND l.key != ?
+            """, (user_id, key)).fetchall()
+        finally:
+            conn.close()
+        best = None
+        for r in rows:
+            sc = cosine_similarity(blob_to_vector(r["vec"]), vec)
+            if best is None or sc > best["score"]:
+                best = {"key": r["key"], "value": r["value"], "score": sc}
+        if best and best["score"] >= 0.85:
             return best
         return None
 
@@ -999,11 +1035,13 @@ l0 最多 2 条，默认 0 条。l2 最多 3 条，默认 0 条。value 控制�
                            re.search(r'覆盖率\s*\d+\s*%|\d+\s*条\s*/?\s*\d+\s*字', _v):
                             logger.info(f"[反思] 疑似流水账，已丢弃: {_k} = {_v[:20]}")
                             continue
-                        # 硬性拦截：超过 40 字属于工作记忆，不配进 L0，自动降级到 L1
-                        if len(_v) > 40:
+                        # 硬性拦截：改用与工具路径同一套分类上限，避免同一事实因来源不同而分层不一
+                        _lim = {"environment": 120, "identity": 300, "preference": 300,
+                                "relationship": 300, "taboo": 200}.get(_c, 200)
+                        if len(_v) > _lim or _v.count("\n") >= 2:
                             _rid = self.storage.upsert_l1_working(user_id, _k, _v)
                             self._spawn_l1_embed(_rid, _k, _v)
-                            logger.info(f"[反思] 拦截过长 L0，已自动降级至 L1: {_k}")
+                            logger.info(f"[反思] 超 L0 上限（{_c} 限 {_lim} 字，实际 {len(_v)} 字），已降级至 L1: {_k}")
                         else:
                             self.storage.upsert_l0(user_id, _c, _k, _v)
                 if "l2" in data:
@@ -1181,7 +1219,7 @@ l0 最多 2 条，默认 0 条。l2 最多 3 条，默认 0 条。value 控制�
         yield f"已更新任务：[{status}] {title}"
 
     @filter.llm_tool(name="cyrene_update_working_memory")
-    async def cyrene_update_working_memory(self, event: AstrMessageEvent, key: str, value: str, old_key: str = ""):
+    async def cyrene_update_working_memory(self, event: AstrMessageEvent, key: str, value: str, old_key: str = "", force: str = ""):
         '''更新当前的工作记忆（L1）。
         
         当用户在讨论具体的技术排查、项目文件路径、正在修改的代码、临时配置时，【必须调用本工具记录工作状态】。
@@ -1197,6 +1235,7 @@ l0 最多 2 条，默认 0 条。l2 最多 3 条，默认 0 条。value 控制�
             key (string): 新记忆的键名，如 "C项目路径"、"当前报错"
             value (string): 融合了新旧信息后最准确的值
             old_key (string): 需要被覆盖/删除的旧冲突键名（如果没有冲突则不填）
+            force (string): 填 "true" 表示确认与既有条目并存（仅当系统提示"已存在相似条目"、而你确认这是两件事时使用）
         '''
         user_id = event.get_sender_id()
         if not user_id:
@@ -1204,10 +1243,23 @@ l0 最多 2 条，默认 0 条。l2 最多 3 条，默认 0 条。value 控制�
             return
             
         # 如果传了 old_key，且与 key 不同，执行融合纠错（删掉旧条目）
-        if old_key and old_key.strip() != "" and old_key != key:
+        _has_old = bool(old_key and old_key.strip() and old_key.strip() != key)
+        if _has_old:
             self.storage.delete_l1_working_by_key(user_id, old_key.strip())
             logger.info(f"[Cyrene Memory] L1 融合纠错: 已删除过时记忆 {old_key}")
             
+        # 写前撞库：模型没指定 old_key、也没声明 force 时，先看是否已有近似条目。
+        # 命中只返回提示、不落库 —— 自动合并会误删，决定权留给模型。
+        if not _has_old and str(force).strip().lower() not in ("true", "1", "yes"):
+            _dup = await self._find_similar_l1(user_id, key, value)
+            if _dup:
+                logger.info(f"[Cyrene Memory] L1 撞库命中: {_dup['key']} (相似度 {_dup['score']:.2f})，已拦截待模型确认")
+                yield (f"已存在相似条目「{_dup['key']}」：{_dup['value'][:50]}"
+                       f"（相似度 {_dup['score']:.2f}），本次写入已拦截。\n"
+                       f"· 要替换它 → old_key='{_dup['key']}' 重新调用\n"
+                       f"· 确认是两件并存的事 → 带 force='true' 重新调用")
+                return
+
         _rid = self.storage.upsert_l1_working(user_id, key, value)
         self._spawn_l1_embed(_rid, key, value)
         logger.info(f"[Cyrene Memory] L1 工作记忆写入: {key} = {value}")

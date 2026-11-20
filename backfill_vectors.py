@@ -17,9 +17,19 @@ def get_vec(text):
 conn = sqlite3.connect(db_path)
 conn.row_factory = sqlite3.Row
 
+def done_ids(record_type):
+    """已回过量的 record_id 集合，重跑时直接跳过，不重复烧 embedding"""
+    return {row[0] for row in conn.execute(
+        "SELECT record_id FROM embeddings WHERE record_type = ?", (record_type,))}
+
 print("开始回填 L2...")
+_done_l2 = done_ids("l2")
+_skip_l2 = 0
 l2_rows = conn.execute("SELECT id, content FROM l2_events").fetchall()
 for r in l2_rows:
+    if r["id"] in _done_l2:
+        _skip_l2 += 1
+        continue
     try:
         vec = get_vec(r["content"])
         blob = struct.pack(f'{len(vec)}f', *vec)
@@ -27,10 +37,17 @@ for r in l2_rows:
         print(f"L2 ID {r['id']} 向量化完成")
     except Exception as e:
         print(f"L2 ID {r['id']} 失败: {e}")
+if _skip_l2:
+    print(f"L2 跳过已有向量 {_skip_l2} 条")
 
 print("开始回填 L0...")
+_done_l0 = done_ids("l0")
+_skip_l0 = 0
 l0_rows = conn.execute("SELECT id, key, value FROM l0_profile").fetchall()
 for r in l0_rows:
+    if r["id"] in _done_l0:
+        _skip_l0 += 1
+        continue
     try:
         text = f"{r['key']}: {r['value']}"
         vec = get_vec(text)
@@ -39,6 +56,8 @@ for r in l0_rows:
         print(f"L0 ID {r['id']} 向量化完成")
     except Exception as e:
         print(f"L0 ID {r['id']} 失败: {e}")
+if _skip_l0:
+    print(f"L0 跳过已有向量 {_skip_l0} 条")
 
 conn.commit()
 conn.close()
