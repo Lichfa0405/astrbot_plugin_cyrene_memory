@@ -102,6 +102,14 @@ class CyreneStorage:
                 )
             """)
             conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_emb_record ON embeddings(record_id, record_type)")
+            # P3：久不用渐淡 —— 给 L1/L2 加"使用痕迹"字段（幂等，已存在则静默跳过）
+            for _tbl in ("l1_working", "l2_events"):
+                for _col, _ddl in (("last_used_at", "REAL"), ("use_count", "INTEGER DEFAULT 0")):
+                    try:
+                        conn.execute(f"ALTER TABLE {_tbl} ADD COLUMN {_col} {_ddl}")
+                        logger.info(f"[Cyrene Memory] P3 迁移: {_tbl}.{_col} 已新增")
+                    except sqlite3.OperationalError:
+                        pass
             conn.commit()
             logger.info("[Cyrene Memory] 数据库表结构初始化/检查完成。")
         except Exception as e:
@@ -169,8 +177,19 @@ class CyreneStorage:
     def _archive_l1_batch(self, conn):
         import os, zipfile, json, time
         try:
-            # 每次只切最老的 50 条
-            rows = conn.execute("SELECT * FROM raw_logs ORDER BY created_at ASC LIMIT 50").fetchall()
+            # 优先切片【已反思】的最老 50 条，避免把还没被提炼的原始对话删掉。
+            rows = conn.execute(
+                "SELECT * FROM raw_logs WHERE is_reflected = 1 ORDER BY created_at ASC LIMIT 50"
+            ).fetchall()
+
+            # 兜底：若已反思的不足，退回按 30 天宽限期切片，防止库无限膨胀
+            if not rows:
+                grace_cutoff = time.time() - 30 * 86400
+                rows = conn.execute(
+                    "SELECT * FROM raw_logs WHERE created_at < ? ORDER BY created_at ASC LIMIT 50",
+                    (grace_cutoff,)
+                ).fetchall()
+
             if not rows:
                 return
             
@@ -238,6 +257,31 @@ class CyreneStorage:
             """, (user_id, event_time or now, content, entities, sentiment, tags, importance, now, emotion_note or ""))
             conn.commit()
             return conn.execute("SELECT last_insert_rowid() as id").fetchone()["id"]
+        finally:
+            conn.close()
+
+    def merge_l2_duplicate(self, rid: int, importance: float):
+        """把重复事件并入既有条目。
+        保留原 content 不动，避免与已存的向量错位；
+        importance 取两者较高，use_count 累加，刷新 last_used_at。
+        """
+        now = time.time()
+        conn = self._conn()
+        try:
+            row = conn.execute(
+                "SELECT id FROM l2_events WHERE id = ?", (rid,)
+            ).fetchone()
+            if not row:
+                return False
+            conn.execute("""
+                UPDATE l2_events
+                   SET importance = MAX(importance, ?),
+                       use_count = COALESCE(use_count, 0) + 1,
+                       last_used_at = ?
+                 WHERE id = ?
+            """, (importance, now, rid))
+            conn.commit()
+            return True
         finally:
             conn.close()
 
@@ -403,16 +447,20 @@ class CyreneStorage:
 
     # ---------- True L1 Working Memory ----------
     def upsert_l1_working(self, user_id: str, key: str, value: str):
+        """写入/更新 L1，返回 record_id（供向量化使用）"""
         now = time.time()
         conn = self._conn()
         try:
             # 检查是否存在该 key
             row = conn.execute("SELECT id FROM l1_working WHERE user_id = ? AND key = ?", (user_id, key)).fetchone()
             if row:
-                conn.execute("UPDATE l1_working SET value = ?, updated_at = ? WHERE id = ?", (value, now, row["id"]))
+                rid = row["id"]
+                conn.execute("UPDATE l1_working SET value = ?, updated_at = ? WHERE id = ?", (value, now, rid))
             else:
-                conn.execute("INSERT INTO l1_working (user_id, key, value, updated_at) VALUES (?, ?, ?, ?)", (user_id, key, value, now))
+                cur = conn.execute("INSERT INTO l1_working (user_id, key, value, updated_at) VALUES (?, ?, ?, ?)", (user_id, key, value, now))
+                rid = cur.lastrowid
             conn.commit()
+            return rid
         finally:
             conn.close()
 

@@ -6,3 +6,10 @@ venv/
 *.db-journal
 *.log
 .DS_Store
+
+# 本地备份（改动前的快照，不入库）
+*.bak
+*.bak_*
+main.py.bak*
+storage.py.bak*
+*.zip
